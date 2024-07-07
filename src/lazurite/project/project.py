@@ -201,10 +201,14 @@ def _compile_bgfx_shader_async(
     return compiled_shader
 
 
-def _get_material_folders(proj_config: ProjectConfig, project_path: str):
+def _get_material_folders(proj_config: ProjectConfig, project_path: str, materials: list[str]):
+    include_patterns = proj_config.include_patterns
+    if materials:
+        include_patterns = materials
+
     material_folders: set[pathlib.Path] = set()
     proj_path = pathlib.Path(project_path)
-    for pattern in proj_config.include_patterns:
+    for pattern in include_patterns:
         for path in proj_path.glob(pattern):
             if path.is_dir() and not any(
                 path.match(p) for p in proj_config.exclude_patterns
@@ -252,6 +256,7 @@ def _validate_glsl_code(
 def compile(
     project_path: str,
     profiles: list[str],
+    materials: list[str],
     output_folder: str = "",
     material_patterns: list[str] = None,
     exclude_material_patterns: list[str] = None,
@@ -300,7 +305,8 @@ def compile(
     # {path: (name, {platforms})}
     material_cache: dict[str, tuple[str, set[ShaderPlatform]]] = {}
 
-    for mat_dir in _get_material_folders(proj_config, project_path):
+    errors = 0
+    for mat_dir in _get_material_folders(proj_config, project_path, materials):
         shaders: list[ShaderDefinition] = []
         arg_defines: list[list[MacroDefine]] = []
         arg_code_path: list[str] = []
@@ -428,20 +434,22 @@ def compile(
                     len(shaders) * [mat_config.compiler_options + dxc_args],
                 )
 
-        for i, (shader, result) in enumerate(zip(shaders, results)):
+
+        has_error = False
+        for shader, result in zip(shaders, results):
+            if type(result) is str:  # stop at first compile error
+                print(result)
+                has_error = True
+                break
+
             if mat_config.compiler_type is CompilerType.SHADERC:
                 shader.bgfx_shader = result
-
-                if validate_glsl_code and shader.platform.name.startswith(
-                    ("GLSL", "ESSL")
-                ):
-                    if opengl_context is None:
-                        opengl_context = moderngl.create_context(standalone=True)
-
-                    _validate_glsl_code(shader, opengl_context, arg_defines[i])
-
             else:
                 shader.bgfx_shader.shader_bytes = result
+
+        if has_error:
+            errors += 1
+            continue
 
         # Filter empty shaders.
         for shader_pass in material.passes:
@@ -456,3 +464,5 @@ def compile(
         filepath = os.path.join(filepath, mat_dir.name + Material.EXTENSION)
         with open(filepath, "wb") as f:
             material.write(f)
+     if errors > 0:
+        exit(1)
